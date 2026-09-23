@@ -379,7 +379,56 @@ curl -s 'http://localhost:8000/api/v1/audits/impact/core-lib?version=2.0.0&statu
 - **未知包返回 `200` 空结果（`total=0`、`items=[]`），不返回 404**；
   非法 SemVer 版本参数返回 `422`。
 
-### 7. 导出可验证审计包并校验
+### 7. 审计结果时间桶汇总（按天 / 按周，UTC）
+
+对**已保存**的审计记录按 UTC 时间桶统计 feasible / infeasible / inconclusive 数量及总数，
+支持可选的 UTC 起止时间（**左闭右开** `[start, end)`），空桶补零，结果按桶起始时刻升序。
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `bucket` | 否（默认 `day`） | 时间桶粒度：`day`（UTC 自然日）或 `week`（**周一 UTC 00:00 开始**的自然周） |
+| `start` | 否 | UTC 区间起始（闭）：ISO 8601 如 `2026-09-01T00:00:00Z`，或日期 `2026-09-01`（按 UTC 00:00 计）；省略时取最早记录所在桶的起始时刻 |
+| `end` | 否 | UTC 区间结束（开）：同上格式；省略时取最晚记录所在桶的**下一桶**起始时刻（保证最晚记录落入统计） |
+
+```bash
+# 按天统计 9 月（UTC，左闭右开）
+curl -s 'http://localhost:8000/api/v1/audits/summary?bucket=day&start=2026-09-01T00:00:00Z&end=2026-10-01T00:00:00Z' | jq
+
+# 按周统计（周桶从周一 UTC 开始）；日期型参数等价于当日 UTC 00:00
+curl -s 'http://localhost:8000/api/v1/audits/summary?bucket=week&start=2026-09-01&end=2026-11-01' | jq
+```
+
+返回（节选）：
+
+```json
+{
+  "bucket": "day",
+  "start": "2026-09-01T00:00:00+00:00",
+  "end": "2026-10-01T00:00:00+00:00",
+  "total": 5,
+  "buckets": [
+    {"bucket_start": "2026-09-21T00:00:00+00:00", "feasible": 2, "infeasible": 1, "inconclusive": 0, "total": 3},
+    {"bucket_start": "2026-09-22T00:00:00+00:00", "feasible": 0, "infeasible": 0, "inconclusive": 0, "total": 0},
+    {"bucket_start": "2026-09-23T00:00:00+00:00", "feasible": 2, "infeasible": 0, "inconclusive": 0, "total": 2}
+  ]
+}
+```
+
+要点：
+
+- **左闭右开**：`created_at == start` 的记录计入，`created_at == end` 的记录不计入；
+  区间之外的记录一律不计入；
+- **空桶补零**：区间覆盖到的每个桶都会返回（即使没有记录），`buckets` 按 `bucket_start` 升序；
+- **桶边界固定对齐自然时间**：day 桶为 UTC 零点，week 桶为周一 UTC 零点；
+  传入未对齐的 `start`/`end`（如周三或某天 10:00）时，首/尾桶仍按自然边界铺开，
+  但桶内只统计区间内的记录；
+- **省略边界**：两个边界都可省略；库里没有任何记录时返回空结果
+  （`start`/`end` 为 `null`、`buckets` 为 `[]`）；只省略 `start` 时取最早记录所在桶起始，
+  只省略 `end` 时取最晚记录所在桶的下一桶起始；
+- **422 场景**：时间无法解析、无时区、非 UTC 时区偏移（如 `+03:00`）、
+  或 `start >= end` 时整体返回 `422`；`bucket` 非 `day`/`week` 同样返回 `422`。
+
+### 8. 导出可验证审计包并校验
 
 把**按创建时间排序**的 `audit_id` 列表（1～100 个、不可重复）交给导出接口，
 得到确定性的 JSONL 导出包：每条记录是规范化 JSON（键排序、紧凑、UTF-8），
@@ -483,6 +532,7 @@ def verify(gzip_base64):
 | `GET`  | `/api/v1/audit-jobs/{job_id}` | 查询作业：queued/running/succeeded/failed 状态、六态完成计数与逐项结果 |
 | `DELETE` | `/api/v1/audit-jobs/{job_id}/items/{index}` | 取消作业中尚未开始（queued）的条目（`200`；已开始/已结束 `409`；越界/作业不存在 `404`） |
 | `GET`  | `/api/v1/audits` | 审计记录列表，支持 `status` / `limit` / `offset` |
+| `GET`  | `/api/v1/audits/summary` | 按 UTC 时间桶（`bucket=day|week`）汇总已保存审计结果，可选 `start`/`end`（左闭右开），空桶补零，week 从周一 UTC 开始；时间格式或区间非法返回 `422` |
 | `GET`  | `/api/v1/audits/{id}` | 查询单条审计的完整结果 |
 | `GET`  | `/api/v1/audits/impact/{package_name}` | 历史影响反查：扫描 resolution/sources/conflicts，找直接或传递依赖该包/版本的审计（可选 `version` / `status` / `limit`），未知包返回空结果而非 404 |
 | `POST` | `/api/v1/audits/export-bundle` | 把已有审计结果打包为确定性、可验证的 JSONL 导出包（只读，不写库） |
@@ -541,6 +591,8 @@ pytest -q
 异步审计作业（单条/批量提交立即返回、逐项隔离与计数、非法清单单项失败、queued 条目取消与
 409/404/422 语义、全部取消即收尾、处理中/未开始两类作业的重启恢复与防重复落库）、
 历史影响反查（resolution/冲突约束/来源链命中、层级与稳定排序、版本聚合、未知包空结果），
+时间桶汇总（day/week 分桶与周一 UTC 对齐、左闭右开边界、空桶补零、缺省边界派生、
+时间格式与区间非法返回 422、不被 /{id} 路由遮蔽），
 以及导出包的确定性、重复/未知 ID 错误码与逐字节/顺序篡改识别。
 
 ## 项目结构
@@ -553,6 +605,7 @@ app/
   solver.py     # 回溯求解器、冲突极小化与来源链
   semver.py     # SemVer 2.0.0 与版本范围解析
   database.py   # SQLite 建表/注册表/审计记录/异步作业表与状态流转
+  summary.py    # 审计结果的 UTC 时间桶汇总：day/week 分桶、左闭右开过滤、空桶补零（纯内存）
   models.py     # Pydantic 请求/响应模型
   impact.py     # 历史影响反查：resolution/sources/conflicts 扫描与层级计算
   bundle.py     # 可验证 JSONL 导出包的确定性构造与校验（sha256/gzip，纯内存）

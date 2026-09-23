@@ -118,6 +118,35 @@ class AuditSummary(BaseModel):
     conflict_count: int
 
 
+# ---------- 审计结果时间桶汇总 ----------
+
+
+class AuditSummaryBucketOut(BaseModel):
+    """单个时间桶的状态计数（空桶同样补零返回）。"""
+
+    bucket_start: str = Field(..., description="桶起始时刻（UTC ISO 8601）；day=UTC 零点，week=周一 UTC 零点")
+    feasible: int
+    infeasible: int
+    inconclusive: int
+    total: int = Field(..., description="桶内三种状态记录总数")
+
+
+class AuditSummaryResponse(BaseModel):
+    """GET /api/v1/audits/summary：按 day/week 桶汇总已保存审计结果。"""
+
+    bucket: Literal["day", "week"]
+    start: Optional[str] = Field(
+        None, description="统计区间起始（UTC ISO 8601，闭区间）；无记录且未指定时为 null"
+    )
+    end: Optional[str] = Field(
+        None, description="统计区间结束（UTC ISO 8601，开区间）；无记录且未指定时为 null"
+    )
+    total: int = Field(..., description="区间内全部桶的审计记录总数")
+    buckets: List[AuditSummaryBucketOut] = Field(
+        ..., description="按桶起始时刻升序，空桶补零"
+    )
+
+
 class ConflictStepOut(BaseModel):
     package: str
     version_range: str

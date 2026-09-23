@@ -33,6 +33,7 @@ from .database import (
     insert_audit,
     insert_audit_job,
     iter_audits,
+    list_audit_created_status,
     list_audit_job_items,
     list_audits,
     load_registry,
@@ -51,6 +52,7 @@ from .models import (
     AuditJobResponse,
     AuditResponse,
     AuditSummary,
+    AuditSummaryResponse,
     BatchAuditError,
     BatchAuditIn,
     BatchAuditItemOut,
@@ -66,6 +68,7 @@ from .models import (
 )
 from .semver import Version, VersionError
 from .solver import Solver
+from .summary import InvalidTimeBound, build_audit_summary, parse_utc_bound
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +128,7 @@ def index() -> dict:
             "POST /api/v1/audits",
             "POST /api/v1/audits/batch",
             "GET /api/v1/audits",
+            "GET /api/v1/audits/summary",
             "GET /api/v1/audits/{audit_id}",
             "GET /api/v1/audits/impact/{package_name}",
             "POST /api/v1/audits/export-bundle",
@@ -514,6 +518,70 @@ def get_audits(
         for row in rows
     ]
     return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@app.get(
+    "/api/v1/audits/summary",
+    response_model=AuditSummaryResponse,
+    tags=["audits"],
+    summary="按 UTC 时间桶（day/week）汇总已保存审计结果的状态计数",
+)
+def get_audits_summary(
+    request: Request,
+    bucket: str = Query(
+        "day",
+        pattern="^(day|week)$",
+        description="时间桶粒度：day（UTC 自然日）或 week（周一 UTC 开始的自然周）",
+    ),
+    start: Optional[str] = Query(
+        None,
+        description=(
+            "可选，UTC 区间起始（左闭）：ISO 8601（如 2026-09-01T00:00:00Z）"
+            "或日期 YYYY-MM-DD（按 UTC 00:00 计）；省略时取最早记录所在桶起始"
+        ),
+    ),
+    end: Optional[str] = Query(
+        None,
+        description=(
+            "可选，UTC 区间结束（右开）：ISO 8601（如 2026-09-30T00:00:00Z）"
+            "或日期 YYYY-MM-DD；省略时取最晚记录所在桶的下一桶起始"
+        ),
+    ),
+) -> AuditSummaryResponse:
+    """统计区间 ``[start, end)`` 内**已保存**审计记录，按桶返回
+    feasible/infeasible/inconclusive 数量及总数。
+
+    * 区间左闭右开，范围外记录不计入；空桶补零，桶按起始时刻升序；
+    * week 桶从**周一 UTC 00:00**开始，与请求参数是否对齐周一无关；
+    * 时间格式非法、带非 UTC 时区，或 ``start >= end`` 时返回 `422`；
+    * ``start`` / ``end`` 均可省略：无任何记录时返回空结果，
+      省略 ``start`` 取最早记录所在桶起始，省略 ``end`` 取最晚记录的下一桶起始。
+    """
+    start_dt = None
+    end_dt = None
+    if start is not None:
+        try:
+            start_dt = parse_utc_bound(start)
+        except InvalidTimeBound as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if end is not None:
+        try:
+            end_dt = parse_utc_bound(end)
+        except InvalidTimeBound as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if start_dt is not None and end_dt is not None and start_dt >= end_dt:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"非法时间区间：start（{start_dt.isoformat()}）必须早于 "
+                f"end（{end_dt.isoformat()}），区间为左闭右开"
+            ),
+        )
+
+    conn = get_conn(request)
+    rows = list_audit_created_status(conn)
+    body = build_audit_summary(rows, bucket=bucket, start=start_dt, end=end_dt)
+    return AuditSummaryResponse(**body)
 
 
 @app.get("/api/v1/audits/{audit_id}", response_model=AuditResponse, tags=["audits"])

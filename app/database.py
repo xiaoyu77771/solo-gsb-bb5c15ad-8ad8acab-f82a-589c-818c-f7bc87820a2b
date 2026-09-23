@@ -225,6 +225,18 @@ def iter_audits(conn: sqlite3.Connection, status: Optional[str] = None) -> Itera
         yield from conn.execute("SELECT * FROM audits ORDER BY created_at DESC, id")
 
 
+def list_audit_created_status(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
+    """返回全部审计记录的 (created_at, status)，供时间桶统计使用。
+
+    区间过滤与分桶在内存中完成（ISO 字符串可能因微秒精度不同而无法直接
+    按字典序比较），因此这里只做轻量的全量取数。
+    """
+    return [
+        (row["created_at"], row["status"])
+        for row in conn.execute("SELECT created_at, status FROM audits")
+    ]
+
+
 # ---------- 异步审计作业 ----------
 
 
