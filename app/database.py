@@ -214,6 +214,12 @@ def count_audits(conn: sqlite3.Connection, status: Optional[str] = None) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM audits").fetchone()[0])
 
 
+def iter_audit_status_rows(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
+    """返回全部审计记录的 (created_at, status)，供时间桶汇总等全量统计使用。"""
+    rows = conn.execute("SELECT created_at, status FROM audits").fetchall()
+    return [(row["created_at"], row["status"]) for row in rows]
+
+
 def iter_audits(conn: sqlite3.Connection, status: Optional[str] = None) -> Iterator[sqlite3.Row]:
     """遍历全部审计记录（按创建时间倒序），供全量扫描类查询使用。"""
     if status:

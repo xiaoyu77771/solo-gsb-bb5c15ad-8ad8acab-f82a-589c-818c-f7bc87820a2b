@@ -17,14 +17,17 @@
 docker compose up --build
 ```
 
+（后台运行可用 `docker compose up --build -d`，停止用 `docker compose down`。）
+
 启动后：
 
 | 用途 | 地址 |
 | --- | --- |
-| API 服务 | <http://localhost:8000> |
+| API 服务（监听容器内 `8000`，映射到宿主机 **8000** 端口） | <http://localhost:8000> |
 | Swagger UI（可直接发请求） | <http://localhost:8000/docs> |
 | 健康检查 | <http://localhost:8000/health> |
 
+依赖安装在镜像构建阶段完成（`pip install -r requirements.txt`）；
 首次启动容器入口脚本会先执行 `python -m app.bootstrap`（自动建表；仅当注册表为空时播种
 `data/seed_registry.json`），再启动 uvicorn；该初始化幂等，可安全重复执行。
 若启动时存在未完成的异步作业，应用生命周期会依据 SQLite 状态自动恢复（见下文第 5 节）。
@@ -472,6 +475,50 @@ def verify(gzip_base64):
     assert hashlib.sha256(env["jsonl"].encode()).hexdigest() == m["payload_sha256"]  # 整体
 ```
 
+## 审计结果时间桶汇总
+
+按可选的 UTC 起止时间（**左闭右开** `[start, end)`）统计**已保存**的审计结果，
+支持 `day`（UTC 自然日）与 `week`（UTC 自然周，**从周一开始**）两种时间桶，
+每个桶返回 `feasible` / `infeasible` / `inconclusive` 数量及 `total`，
+结果按桶起始时刻升序，范围内**空桶自动补零**，范围外记录不计入。
+
+```bash
+# 按天统计 2026-09-01 ~ 2026-10-01（左闭右开）
+curl -s 'http://localhost:8000/api/v1/audits/summary?bucket=day&start=2026-09-01T00:00:00Z&end=2026-10-01T00:00:00Z' | jq
+
+# 按周统计（周桶从 UTC 周一 00:00 开始），不传时间则覆盖全部已保存记录所在周
+curl -s 'http://localhost:8000/api/v1/audits/summary?bucket=week' | jq
+```
+
+返回：
+
+```json
+{
+  "bucket": "day",
+  "start": "2026-09-01T00:00:00+00:00",
+  "end": "2026-10-01T00:00:00+00:00",
+  "total": 4,
+  "buckets": [
+    {"bucket_start": "2026-09-19T00:00:00+00:00", "feasible": 2, "infeasible": 1, "inconclusive": 0, "total": 3},
+    {"bucket_start": "2026-09-20T00:00:00+00:00", "feasible": 0, "infeasible": 0, "inconclusive": 0, "total": 0},
+    {"bucket_start": "2026-09-21T00:00:00+00:00", "feasible": 1, "infeasible": 0, "inconclusive": 0, "total": 1}
+  ]
+}
+```
+
+参数与语义：
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `bucket` | 否（默认 `day`） | `day` 或 `week`；周桶从 UTC 周一 00:00 开始 |
+| `start` | 否 | 区间起点（ISO 8601、**必须带时区**，如 `2026-09-01T00:00:00Z` 或 `+00:00`），左闭；省略时回退到最早一条审计记录所在桶 |
+| `end` | 否 | 区间终点（同上），**右开、`end` 时刻本身不计入**；省略时覆盖到最晚一条审计记录所在桶 |
+
+- 起止边界分别**向下对齐**到所在桶的起点（例如 `start=09-20T07:00Z` 仍从 `09-20T00:00Z` 桶开始）；
+- 与区间相交的所有桶都会返回，没有记录的桶三项计数补零；
+- 没有任何审计记录且省略时间参数时返回 `buckets: []`；
+- 时间格式非法（无法解析、缺时区）、`start >= end` 或区间跨度过大（超过 10000 个桶）返回 `422`。
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -483,6 +530,7 @@ def verify(gzip_base64):
 | `GET`  | `/api/v1/audit-jobs/{job_id}` | 查询作业：queued/running/succeeded/failed 状态、六态完成计数与逐项结果 |
 | `DELETE` | `/api/v1/audit-jobs/{job_id}/items/{index}` | 取消作业中尚未开始（queued）的条目（`200`；已开始/已结束 `409`；越界/作业不存在 `404`） |
 | `GET`  | `/api/v1/audits` | 审计记录列表，支持 `status` / `limit` / `offset` |
+| `GET`  | `/api/v1/audits/summary` | 按 day/week 时间桶统计 feasible/infeasible/inconclusive 数量及总数（可选 UTC 左闭右开区间，空桶补零，非法时间/区间 `422`） |
 | `GET`  | `/api/v1/audits/{id}` | 查询单条审计的完整结果 |
 | `GET`  | `/api/v1/audits/impact/{package_name}` | 历史影响反查：扫描 resolution/sources/conflicts，找直接或传递依赖该包/版本的审计（可选 `version` / `status` / `limit`），未知包返回空结果而非 404 |
 | `POST` | `/api/v1/audits/export-bundle` | 把已有审计结果打包为确定性、可验证的 JSONL 导出包（只读，不写库） |
@@ -541,6 +589,8 @@ pytest -q
 异步审计作业（单条/批量提交立即返回、逐项隔离与计数、非法清单单项失败、queued 条目取消与
 409/404/422 语义、全部取消即收尾、处理中/未开始两类作业的重启恢复与防重复落库）、
 历史影响反查（resolution/冲突约束/来源链命中、层级与稳定排序、版本聚合、未知包空结果），
+审计时间桶汇总（day/week 分桶、UTC 周一起桶、空桶补零、左闭右开区间裁剪、
+时区归一化、缺省区间回退、非法时间/区间 422、跨度过大 422），
 以及导出包的确定性、重复/未知 ID 错误码与逐字节/顺序篡改识别。
 
 ## 项目结构
@@ -555,6 +605,7 @@ app/
   database.py   # SQLite 建表/注册表/审计记录/异步作业表与状态流转
   models.py     # Pydantic 请求/响应模型
   impact.py     # 历史影响反查：resolution/sources/conflicts 扫描与层级计算
+  timebucket.py # 审计汇总：UTC 时间解析、day/week 分桶与零填充（纯函数）
   bundle.py     # 可验证 JSONL 导出包的确定性构造与校验（sha256/gzip，纯内存）
 data/
   seed_registry.json   # 示例注册表

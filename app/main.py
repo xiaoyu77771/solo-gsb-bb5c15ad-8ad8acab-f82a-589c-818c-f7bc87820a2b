@@ -32,6 +32,7 @@ from .database import (
     get_audit_job_item,
     insert_audit,
     insert_audit_job,
+    iter_audit_status_rows,
     iter_audits,
     list_audit_job_items,
     list_audits,
@@ -51,6 +52,7 @@ from .models import (
     AuditJobResponse,
     AuditResponse,
     AuditSummary,
+    AuditSummaryResponse,
     BatchAuditError,
     BatchAuditIn,
     BatchAuditItemOut,
@@ -66,6 +68,7 @@ from .models import (
 )
 from .semver import Version, VersionError
 from .solver import Solver
+from .timebucket import TimeRangeError, build_time_summary, parse_utc_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +128,7 @@ def index() -> dict:
             "POST /api/v1/audits",
             "POST /api/v1/audits/batch",
             "GET /api/v1/audits",
+            "GET /api/v1/audits/summary",
             "GET /api/v1/audits/{audit_id}",
             "GET /api/v1/audits/impact/{package_name}",
             "POST /api/v1/audits/export-bundle",
@@ -514,6 +518,57 @@ def get_audits(
         for row in rows
     ]
     return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@app.get(
+    "/api/v1/audits/summary",
+    response_model=AuditSummaryResponse,
+    tags=["audits"],
+    summary="审计结果时间桶汇总：按 day/week 统计 feasible/infeasible/inconclusive 数量",
+)
+def get_audits_summary(
+    request: Request,
+    bucket: str = Query(
+        "day",
+        pattern="^(day|week)$",
+        description="时间桶粒度：day=UTC 自然日，week=UTC 自然周（周一开始）",
+    ),
+    start: Optional[str] = Query(
+        None,
+        description="可选，区间起点（UTC ISO 8601，左闭）；省略时从最早一条审计记录所在桶开始",
+    ),
+    end: Optional[str] = Query(
+        None,
+        description="可选，区间终点（UTC ISO 8601，右开，不计入）；省略时覆盖到最晚一条审计记录所在桶",
+    ),
+) -> AuditSummaryResponse:
+    """按可选 UTC 起止时间（左闭右开）统计**已保存**的审计结果。
+
+    * 桶边界：day 从 UTC 00:00 开始，week 从 UTC 周一 00:00 开始；
+    * 起止边界分别向下对齐到所在桶起点，覆盖范围内的空桶补零；
+    * 范围外的记录不计入；结果按桶起始时刻升序；
+    * 时间格式非法（缺时区/无法解析）或区间非法（start >= end、跨度过大）返回 422。
+    """
+    try:
+        start_dt = parse_utc_datetime(start, "start") if start is not None else None
+        end_dt = parse_utc_datetime(end, "end") if end is not None else None
+        conn = get_conn(request)
+        buckets, effective_start, effective_end = build_time_summary(
+            iter_audit_status_rows(conn),
+            bucket=bucket,  # type: ignore[arg-type]  # pattern 已限定 day|week
+            start=start_dt,
+            end=end_dt,
+        )
+    except TimeRangeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return AuditSummaryResponse(
+        bucket=bucket,  # type: ignore[arg-type]
+        start=effective_start.isoformat() if effective_start is not None else None,
+        end=effective_end.isoformat() if effective_end is not None else None,
+        total=sum(int(b["total"]) for b in buckets),
+        buckets=buckets,  # type: ignore[arg-type]
+    )
 
 
 @app.get("/api/v1/audits/{audit_id}", response_model=AuditResponse, tags=["audits"])
