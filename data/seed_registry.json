@@ -1,0 +1,45 @@
+{
+  "core-lib": {
+    "versions": [
+      {"version": "2.1.0", "dependencies": {}},
+      {"version": "2.0.0", "dependencies": {}},
+      {"version": "1.5.0", "dependencies": {}},
+      {"version": "1.4.0", "dependencies": {}},
+      {"version": "1.0.0", "dependencies": {}},
+      {"version": "1.0.0-rc.1", "dependencies": {}}
+    ]
+  },
+  "authkit": {
+    "versions": [
+      {"version": "2.0.0", "dependencies": {"core-lib": "^2.0.0", "cachekit": "^1.0.0"}},
+      {"version": "1.2.0", "dependencies": {"core-lib": ">=1.4.0 <2.0.0", "cachekit": "^1.0.0"}},
+      {"version": "1.0.0", "dependencies": {"core-lib": "~1.0.0", "cachekit": "^1.0.0"}}
+    ]
+  },
+  "cachekit": {
+    "versions": [
+      {"version": "1.3.0", "dependencies": {"core-lib": "^1.4.0"}},
+      {"version": "1.1.0", "dependencies": {"core-lib": ">=1.0.0 <2.0.0"}},
+      {"version": "1.0.0", "dependencies": {"core-lib": "^1.0.0"}}
+    ]
+  },
+  "loggerkit": {
+    "versions": [
+      {"version": "0.9.0", "dependencies": {"core-lib": "^2.0.0"}},
+      {"version": "0.5.0", "dependencies": {"core-lib": "^1.0.0"}},
+      {"version": "0.4.0", "dependencies": {"core-lib": "~1.4.0"}}
+    ]
+  },
+  "httpkit": {
+    "versions": [
+      {"version": "3.0.0", "dependencies": {"loggerkit": "^0.9.0"}},
+      {"version": "2.2.0", "dependencies": {"loggerkit": ">=0.5.0 <0.9.0"}},
+      {"version": "2.0.0", "dependencies": {"loggerkit": "~0.4.0"}}
+    ]
+  },
+  "megaplugin": {
+    "versions": [
+      {"version": "1.0.0", "dependencies": {"authkit": "^1.0.0", "httpkit": "~2.2.0"}}
+    ]
+  }
+}
